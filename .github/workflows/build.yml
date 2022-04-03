@@ -1,0 +1,63 @@
+name: build
+
+on:
+#  repository_dispatch:
+  workflow_dispatch:
+#  push:
+#  release:
+#    types: [released, edited]
+
+jobs:
+  build:
+    name: ${{ matrix.TARGET }} ${{ matrix.TARGET_ARCH }}
+    runs-on: ubuntu-20.04
+    env:
+      GITHUB_TOKEN: ${{ secrets.TK }}
+      TZ: Asia/Shanghai
+      EXTRA_BUILD_ARGS: --cross-bindir=/usr/lib/llvm-10/bin TARGET=${{ matrix.TARGET }} TARGET_ARCH=${{ matrix.TARGET_ARCH }}
+    strategy:
+      matrix:
+         TARGET: [amd64]
+         TARGET_ARCH: [amd64]
+    steps:
+      - uses: actions/checkout@v2
+      - name: Create environment
+        run: |
+         sudo apt update --quiet || true
+         sudo apt -yq --no-install-suggests --no-install-recommends install bmake libarchive-dev clang-10 lld-10
+         echo "NPROC=`getconf _NPROCESSORS_ONLN 2>/dev/null || getconf NPROCESSORS_ONLN 2>/dev/null || echo 1`" >> $GITHUB_ENV
+         echo "MAKEOBJDIRPREFIX=${PWD}/build" >> $GITHUB_ENV
+         mkdir build kernel releases
+         wget https://github.com/freebsd/freebsd-src/archive/refs/heads/main.zip && unzip -q main.zip
+      - name: Cross-build
+        run: |
+          cd freebsd-src-main/sys/${{ matrix.TARGET }}/conf
+          cp GENERIC bbr
+          sed -i 's/makeoptions/#makeoptions/' bbr
+          sed -i 's/GENERIC/bbr/' bbr
+          echo "
+          options         TCPHPTS
+          options         RATELIMIT
+          makeoptions     WITH_EXTRA_TCP_STACKS=1
+          " >> bbr
+          cd $GITHUB_WORKSPACE/freebsd-src-main/tools/build/
+          ./make.py $EXTRA_BUILD_ARGS -n
+          ./make.py $EXTRA_BUILD_ARGS kernel-toolchain -s -j$NPROC
+          ./make.py kernel $EXTRA_BUILD_ARGS KERNCONF=bbr -s -j$NPROC DESTDIR=$GITHUB_WORKSPACE/kernel
+          cd $GITHUB_WORKSPACE/kernel/boot && tar cfJ kernel_${{ matrix.TARGET_ARCH }}.txz kernel && mv *.txz ${GITHUB_WORKSPACE}/releases
+      - name: Generate release tag
+        run: |
+          echo "::set-output name=release_tag::cross"
+          touch release.txt
+          echo "Last updated on $(date +"%Y.%m.%d-%H:%M") UTC+08:00" >> release.txt
+      - name: Upload kernels to release
+        uses: softprops/action-gh-release@v1
+        with:
+         tag_name: cross
+         body_path: release.txt
+         files: releases/*
+      - name: Delete workflow runs
+        uses: GitRML/delete-workflow-runs@main
+        with:
+         retain_days: 1
+         keep_minimum_runs: 3
